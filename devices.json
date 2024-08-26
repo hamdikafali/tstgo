@@ -1,0 +1,14 @@
+
+{
+    "devices": {
+      "mikrotik": "mikrotik",
+      "fortinet": "FGT",
+      "palo_alto": "PA",
+      "cisco": "cisco"
+    },
+    "log_types": {
+      "firewall": ["firewall", "fw"],
+      "web_filter": ["webfilter", "urlfilter"]
+    }
+  }
+  
