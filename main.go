@@ -1,7 +1,7 @@
-
 package main
 
 import (
+	"gopkg.in/yaml.v2"
     "encoding/json"
     "fmt"
     "io/ioutil"
@@ -14,12 +14,13 @@ import (
 )
 
 const (
-    initialWorkerCount = 10    // Başlangıç işçi sayısı
-    maxWorkerCount     = 100   // Maksimum işçi sayısı
-    bufferSize         = 10000 // Bellek tamponu boyutu (10.000 log)
-    maxConnections     = 10000 // Maksimum TCP bağlantı sayısı
+    configFile         = "devices.json"      // Mevcut config.json
+    epsConfigFile      = "eps_limits.json"  // EPS limitlerini içeren JSON dosyası
+    initialWorkerCount = 10                 // Başlangıç işçi sayısı
+    maxWorkerCount     = 100                // Maksimum işçi sayısı
+    bufferSize         = 10000              // Bellek tamponu boyutu (10.000 log)
+    maxConnections     = 10000              // Maksimum TCP bağlantı sayısı
     logDir             = "logs"
-    configFile         = "config.json" // Konfigürasyon dosyası
 )
 
 var (
@@ -29,8 +30,14 @@ var (
     epsCounter   int
     mu           sync.Mutex
     config       Config
+    epsConfig    EPSConfig
+	ipEPS = make(map[string]int)
+	//EPSCheckInterval int `yaml:"eps_check_interval"`
 )
-
+var yamlConfig struct {
+    EPSCheckInterval   int `yaml:"eps_check_interval"`
+    ConfigCheckInterval int `yaml:"config_check_interval"`
+}
 type LogEntry struct {
     IP        string
     LogType   string
@@ -39,21 +46,51 @@ type LogEntry struct {
     Device    string // Logun geldiği cihazı belirtiyor
 }
 
-// Config struct to hold the configuration from the JSON file
+// Config struct for the main config.json
 type Config struct {
     Devices  map[string]string   `json:"devices"`
     LogTypes map[string][]string `json:"log_types"`
 }
 
+// EPSConfig struct to hold the EPS limits from the JSON file
+type EPSConfig struct {
+    Limits map[string]IPConfig `json:"limits"`
+}
+
+// IPConfig struct for each IP's EPS limit and behavior
+type IPConfig struct {
+    Limit int  `json:"limit"`
+    Alert bool `json:"alert"`
+}
+
 func main() {
     var wg sync.WaitGroup
 
-    // Konfigürasyon dosyasını yükle
-    err := loadConfig(configFile)
+	err := loadYAMLConfig()
     if err != nil {
-        fmt.Fprintf(os.Stderr, "Konfigürasyon yüklenirken hata: %v\n", err)
+        fmt.Fprintf(os.Stderr, "YAML Konfigürasyon yüklenirken hata: %v\n", err)
         os.Exit(1)
     }
+
+    // Log Konfigürasyon dosyasını yükle
+    err := loadConfig(configFile)
+	
+    if err != nil {
+        fmt.Println(os.Stderr, "Ana Konfigürasyon yüklenirken hata: %v\\n", err)
+        os.Exit(1)
+    }
+
+	go monitorYAMLConfigFile()
+
+    // EPS Konfigürasyon dosyasını yükle
+    err = loadEPSConfig(epsConfigFile)
+    if err != nil {
+        fmt.Println(os.Stderr, "EPS Konfigürasyon yüklenirken hata: %v\\n", err)
+        os.Exit(1)
+    }
+
+    // Konfigürasyon dosyasını düzenli aralıklarla kontrol et
+    go monitorConfigFile()
 
     // İşçi havuzunu başlat
     for i := 0; i < initialWorkerCount; i++ {
@@ -85,13 +122,54 @@ func main() {
     close(logChannel)
 }
 
-// Konfigürasyon dosyasını yükler
+func loadYAMLConfig() error {
+    data, err := ioutil.ReadFile("config.yaml")
+    if err != nil {
+        return err
+    }
+    return yaml.Unmarshal(data, &yamlConfig)
+}
+func monitorYAMLConfigFile() {
+    ticker := time.NewTicker(time.Duration(yamlConfig.ConfigCheckInterval) * time.Second)
+    for range ticker.C {
+        err := loadYAMLConfig()
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "YAML Konfigürasyon yeniden yüklenirken hata: %v\n", err)
+        } else {
+            fmt.Println("YAML Konfigürasyonu yeniden yüklendi.")
+        }
+    }
+}
+
+// Ana Konfigürasyon dosyasını yükler
 func loadConfig(file string) error {
     data, err := ioutil.ReadFile(file)
     if err != nil {
         return err
     }
     return json.Unmarshal(data, &config)
+}
+
+// EPS Konfigürasyon dosyasını yükler
+func loadEPSConfig(file string) error {
+    data, err := ioutil.ReadFile(file)
+    if err != nil {
+        return err
+    }
+    return json.Unmarshal(data, &epsConfig)
+}
+
+// Konfigürasyon dosyasını düzenli aralıklarla kontrol eder
+func monitorConfigFile() {
+    ticker := time.NewTicker(time.Duration(yamlConfig.EPSCheckInterval) * time.Second)
+    for range ticker.C {
+        err := loadEPSConfig(epsConfigFile)
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "EPS Konfigürasyon yeniden yüklenirken hata: %v\n", err)
+        } else {
+            fmt.Println("EPS Konfigürasyonu yeniden yüklendi.")
+        }
+    }
 }
 
 // Dinamik işçi yönetimi
@@ -104,23 +182,36 @@ func manageWorkers() {
             fmt.Printf("İşçi sayısı artırıldı: %d\n", workerCount)
         } else if len(logChannel) < bufferSize/4 && workerCount > initialWorkerCount {
             workerCount--
-            fmt.Printf("İşçi sayısı azaltıldı: %d\n", workerCount)
+            fmt.PrintPrintfln("İşçi sayısı azaltıldı: %d\n", workerCount)
         }
         workerMutex.Unlock()
     }
 }
-
 // EPS monitörü
 func monitorEPS() {
     ticker := time.NewTicker(1 * time.Second)
     for range ticker.C {
         mu.Lock()
-        fmt.Printf("Anlık EPS: %d\n", epsCounter)
-        epsCounter = 0
+        for ip, count := range ipEPS {
+            ipConfig, exists := epsConfig.Limits[ip]
+            if exists {
+                if count > ipConfig.Limit {
+                    if ipConfig.Alert {
+                        fmt.Printf("ALERT! IP %s EPS değeri limiti aştı: %d\n", ip, count)
+                    } else {
+                        // Logu işleme almaz, bu durumu atlar
+                        delete(ipEPS, ip)
+                    }
+                }
+            } else {
+                // IP adresi config dosyasında yoksa logu işleme alma
+                delete(ipEPS, ip)
+            }
+            ipEPS[ip] = 0 // EPS sayacını sıfırla
+        }
         mu.Unlock()
     }
 }
-
 // İşçi fonksiyonu
 func worker(wg *sync.WaitGroup) {
     defer wg.Done()
@@ -134,7 +225,7 @@ func worker(wg *sync.WaitGroup) {
 func listenUDP(address string) {
     conn, err := net.ListenPacket("udp", address)
     if err != nil {
-        fmt.Fprintf(os.Stderr, "UDP dinleme hatası: %v\n", err)
+        fmt.Println(os.Stderr, "UDP dinleme hatası: %v\\n", err)
         os.Exit(1)
     }
     defer conn.Close()
@@ -143,19 +234,18 @@ func listenUDP(address string) {
     for {
         n, addr, err := conn.ReadFrom(buffer)
         if err != nil {
-            fmt.Fprintf(os.Stderr, "UDP log alımı sırasında hata: %v\n", err)
+            fmt.Println(os.Stderr, "UDP log alımı sırasında hata: %v\\n", err)
             continue
         }
 
         processLog(addr, buffer[:n])
     }
 }
-
 // TCP log dinleme fonksiyonu
 func listenTCP(address string) {
     ln, err := net.Listen("tcp", address)
     if err != nil {
-        fmt.Fprintf(os.Stderr, "TCP dinleme hatası: %v\n", err)
+        fmt.Println(os.Stderr, "TCP dinleme hatası: %v\\n", err)
         os.Exit(1)
     }
     defer ln.Close()
@@ -165,7 +255,7 @@ func listenTCP(address string) {
     for {
         conn, err := ln.Accept()
         if err != nil {
-            fmt.Fprintf(os.Stderr, "TCP bağlantı hatası: %v\n", err)
+            fmt.Println(os.Stderr, "TCP bağlantı hatası: %v\\n", err)
             continue
         }
 
@@ -186,7 +276,7 @@ func handleTCPConnection(conn net.Conn) {
         n, err := conn.Read(buffer)
         if err != nil {
             if err.Error() != "EOF" {
-                fmt.Fprintf(os.Stderr, "TCP log alımı sırasında hata: %v\n", err)
+                fmt.Println(os.Stderr, "TCP log alımı sırasında hata: %v\\n", err)
             }
             return
         }
@@ -194,28 +284,36 @@ func handleTCPConnection(conn net.Conn) {
         processLog(conn.RemoteAddr(), buffer[:n])
     }
 }
-
 // Logları işleyen fonksiyon
 func processLog(addr net.Addr, data []byte) {
     ip := strings.Split(addr.String(), ":")[0]
-    logMessage := string(data)
 
-    device := determineDevice(logMessage)
-    logType := determineLogType(logMessage)
-
-    logChannel <- LogEntry{
-        IP:        ip,
-        LogType:   logType,
-        Message:   logMessage,
-        Timestamp: time.Now(),
-        Device:    device,
+    // EPS limitleri arasında IP adresini kontrol et
+    mu.Lock()
+    _, exists := epsConfig.Limits[ip]
+    mu.Unlock()
+    if !exists {
+        // IP adresi EPS limits dosyasında tanımlı değilse, logu işleme
+        return
     }
+
+    logMessage := string(data)
 
     // EPS sayacını artır
     mu.Lock()
-    epsCounter++
+    ipEPS[ip]++
     mu.Unlock()
+
+    // Log girişini kaydet
+    logChannel <- LogEntry{
+        IP:        ip,
+        LogType:   determineLogType(logMessage),
+        Message:   logMessage,
+        Timestamp: time.Now(),
+        Device:    determineDevice(logMessage),
+    }
 }
+
 
 // Cihazı belirler
 func determineDevice(message string) string {
@@ -239,7 +337,6 @@ func determineLogType(message string) string {
     }
     return "general"
 }
-
 func saveLog(entry LogEntry) {
     dateFolder := entry.Timestamp.Format("02-01-2006") // gün-ay-yıl formatı
 
@@ -264,7 +361,7 @@ func saveLog(entry LogEntry) {
         }
         defer file.Close()
 
-        _, err = file.WriteString(fmt.Sprintf("%s\n", entry.Message))
+        _, err = file.WriteString(fmt.Sprintf("%s\\n", entry.Message))
         if err != nil {
             logError(err, "Mesaj yazılamadı")
             time.Sleep(2 * time.Second) // 2 saniye bekleme
@@ -281,5 +378,5 @@ func logError(err error, context string) {
     defer file.Close()
 
     timestamp := time.Now().Format("2006-01-02 15:04:05")
-    file.WriteString(fmt.Sprintf("[%s] %s: %v\n", timestamp, context, err))
+    file.WriteString(fmt.Sprintf("[%s] %s: %v\\n", timestamp, context, err))
 }
