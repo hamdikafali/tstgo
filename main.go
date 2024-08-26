@@ -32,12 +32,8 @@ var (
     config       Config
     epsConfig    EPSConfig
 	ipEPS = make(map[string]int)
-	//EPSCheckInterval int `yaml:"eps_check_interval"`
+	EPSCheckInterval int `yaml:"eps_check_interval"`
 )
-var yamlConfig struct {
-    EPSCheckInterval   int `yaml:"eps_check_interval"`
-    ConfigCheckInterval int `yaml:"config_check_interval"`
-}
 type LogEntry struct {
     IP        string
     LogType   string
@@ -63,24 +59,22 @@ type IPConfig struct {
     Alert bool `json:"alert"`
 }
 
+func loadYAMLConfig() error {
+    data, err := ioutil.ReadFile("config.yaml")
+    if err != nil {
+        return err
+    }
+    return yaml.Unmarshal(data, &yamlConfig)
+}
 func main() {
     var wg sync.WaitGroup
 
-	err := loadYAMLConfig()
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "YAML Konfigürasyon yüklenirken hata: %v\n", err)
-        os.Exit(1)
-    }
-
-    // Log Konfigürasyon dosyasını yükle
+    // Ana Konfigürasyon dosyasını yükle
     err := loadConfig(configFile)
-	
     if err != nil {
         fmt.Println(os.Stderr, "Ana Konfigürasyon yüklenirken hata: %v\\n", err)
         os.Exit(1)
     }
-
-	go monitorYAMLConfigFile()
 
     // EPS Konfigürasyon dosyasını yükle
     err = loadEPSConfig(epsConfigFile)
@@ -121,26 +115,6 @@ func main() {
     wg.Wait()
     close(logChannel)
 }
-
-func loadYAMLConfig() error {
-    data, err := ioutil.ReadFile("config.yaml")
-    if err != nil {
-        return err
-    }
-    return yaml.Unmarshal(data, &yamlConfig)
-}
-func monitorYAMLConfigFile() {
-    ticker := time.NewTicker(time.Duration(yamlConfig.ConfigCheckInterval) * time.Second)
-    for range ticker.C {
-        err := loadYAMLConfig()
-        if err != nil {
-            fmt.Fprintf(os.Stderr, "YAML Konfigürasyon yeniden yüklenirken hata: %v\n", err)
-        } else {
-            fmt.Println("YAML Konfigürasyonu yeniden yüklendi.")
-        }
-    }
-}
-
 // Ana Konfigürasyon dosyasını yükler
 func loadConfig(file string) error {
     data, err := ioutil.ReadFile(file)
@@ -161,17 +135,16 @@ func loadEPSConfig(file string) error {
 
 // Konfigürasyon dosyasını düzenli aralıklarla kontrol eder
 func monitorConfigFile() {
-    ticker := time.NewTicker(time.Duration(yamlConfig.EPSCheckInterval) * time.Second)
+    ticker := time.NewTicker(1 * time.Minute)
     for range ticker.C {
         err := loadEPSConfig(epsConfigFile)
         if err != nil {
-            fmt.Fprintf(os.Stderr, "EPS Konfigürasyon yeniden yüklenirken hata: %v\n", err)
+            fmt.Println(os.Stderr, "EPS Konfigürasyon yeniden yüklenirken hata: %v\\n", err)
         } else {
             fmt.Println("EPS Konfigürasyonu yeniden yüklendi.")
         }
     }
 }
-
 // Dinamik işçi yönetimi
 func manageWorkers() {
     ticker := time.NewTicker(5 * time.Second)
