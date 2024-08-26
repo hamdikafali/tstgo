@@ -11,15 +11,20 @@ import (
 )
 
 const (
-	workerCount     = 1000  // İşçi sayısı
-	bufferSize      = 10000 // Bellek tamponu boyutu (10.000 log)
-	maxConnections  = 10000 // Maksimum TCP bağlantı sayısı
-	logDir          = "logs"
+	initialWorkerCount = 10    // Başlangıç işçi sayısı
+	maxWorkerCount     = 100   // Maksimum işçi sayısı
+	bufferSize         = 10000 // Bellek tamponu boyutu (10.000 log)
+	maxConnections     = 10000 // Maksimum TCP bağlantı sayısı
+	logDir             = "logs"
 )
 
-var logChannel = make(chan LogEntry, bufferSize)
-var epsCounter int
-var mu sync.Mutex
+var (
+	logChannel   = make(chan LogEntry, bufferSize)
+	workerCount  = initialWorkerCount
+	workerMutex  sync.Mutex
+	epsCounter   int
+	mu           sync.Mutex
+)
 
 type LogEntry struct {
 	IP        string
@@ -31,14 +36,14 @@ type LogEntry struct {
 func main() {
 	var wg sync.WaitGroup
 
-	// EPS sayaç fonksiyonunu başlat
-	go monitorEPS()
-
 	// İşçi havuzunu başlat
-	for i := 0; i < workerCount; i++ {
+	for i := 0; i < initialWorkerCount; i++ {
 		wg.Add(1)
 		go worker(&wg)
 	}
+
+	// EPS monitörünü başlat
+	go monitorEPS()
 
 	// TCP ve UDP dinleyicilerini başlat
 	wg.Add(1)
@@ -53,9 +58,30 @@ func main() {
 		listenTCP("0.0.0.0:514")
 	}()
 
+	// İşçi havuzunu dinamik yönet
+	go manageWorkers()
+
 	fmt.Println("Log dinleme başlatıldı.")
 	wg.Wait()
 	close(logChannel)
+}
+
+// Dinamik işçi yönetimi
+func manageWorkers() {
+	ticker := time.NewTicker(5 * time.Second)
+	for range ticker.C {
+		workerMutex.Lock()
+		if len(logChannel) > bufferSize/2 && workerCount < maxWorkerCount {
+			// İşçi sayısını artır
+			workerCount++
+			fmt.Printf("İşçi sayısı artırıldı: %d\n", workerCount)
+		} else if len(logChannel) < bufferSize/4 && workerCount > initialWorkerCount {
+			// İşçi sayısını azalt
+			workerCount--
+			fmt.Printf("İşçi sayısı azaltıldı: %d\n", workerCount)
+		}
+		workerMutex.Unlock()
+	}
 }
 
 // EPS monitörü
