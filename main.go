@@ -20,18 +20,16 @@ const (
     maxConnections     = 10000 // Maksimum TCP bağlantı sayısı
     logDir             = "logs"
     configFile         = "config.json" // Konfigürasyon dosyası
-	epsConfigFile 	   = "eps_limits.json"
 )
 
 var (
-	ipEPS       = make(map[string]int)   // Her IP için EPS sayacı
-	ipLimits    = make(map[string]int)   // Her IP için EPS limiti
+	ipEPS       = make(map[string]int)
     logChannel   = make(chan LogEntry, bufferSize)
     workerCount  = initialWorkerCount
     workerMutex  sync.Mutex
     epsCounter   int
     mu           sync.Mutex
-	config      EPSConfig
+    config       Config
 )
 
 type LogEntry struct {
@@ -48,18 +46,13 @@ type Config struct {
     LogTypes map[string][]string `json:"log_types"`
 }
 
-// EPSConfig struct to hold the EPS limits from the JSON file
-type EPSConfig struct {
-	Limits map[string]int `json:"limits"`
-}
-
 func main() {
     var wg sync.WaitGroup
 
-    // EPS Konfigürasyon dosyasını yükle
-    err := loadEPSConfig(epsConfigFile)
+    // Konfigürasyon dosyasını yükle
+    err := loadConfig(configFile)
     if err != nil {
-        fmt.Fprintf(os.Stderr, "EPS Konfigürasyon yüklenirken hata: %v\n", err)
+        fmt.Fprintf(os.Stderr, "Konfigürasyon yüklenirken hata: %v\n", err)
         os.Exit(1)
     }
 
@@ -93,24 +86,6 @@ func main() {
     close(logChannel)
 }
 
-// EPS Konfigürasyon dosyasını yükler
-func loadEPSConfig(file string) error {
-    data, err := ioutil.ReadFile(file)
-    if err != nil {
-        return err
-    }
-    return json.Unmarshal(data, &config)
-}
-
-// Belirtilen IP için EPS limitini döndürür
-func getEPSLimit(ip string) int {
-	if limit, exists := config.Limits[ip]; exists {
-		return limit
-	}
-	return config.Limits["default"]
-}
-
-
 // Konfigürasyon dosyasını yükler
 func loadConfig(file string) error {
     data, err := ioutil.ReadFile(file)
@@ -120,23 +95,21 @@ func loadConfig(file string) error {
     return json.Unmarshal(data, &config)
 }
 
-// EPS monitörü
-func monitorEPS() {
-	ticker := time.NewTicker(1 * time.Second)
-	for range ticker.C {
-		mu.Lock()
-		for ip, count := range ipEPS {
-			limit := getEPSLimit(ip)
-			//fmt.Printf("Zaman: %s, IP: %s, EPS: %d, Limit: %d\n", time.Now().Format("2006-01-02 15:04:05"), ip, count, limit)
-			if count > limit {
-				fmt.Printf("ALERT! IP %s EPS değeri limiti aştı: %d\n", ip, count)
-			}
-			ipEPS[ip] = 0 // EPS sayacını sıfırla
-		}
-		mu.Unlock()
-	}
+// Dinamik işçi yönetimi
+func manageWorkers() {
+    ticker := time.NewTicker(5 * time.Second)
+    for range ticker.C {
+        workerMutex.Lock()
+        if len(logChannel) > bufferSize/2 && workerCount < maxWorkerCount {
+            workerCount++
+            fmt.Printf("İşçi sayısı artırıldı: %d\n", workerCount)
+        } else if len(logChannel) < bufferSize/4 && workerCount > initialWorkerCount {
+            workerCount--
+            fmt.Printf("İşçi sayısı azaltıldı: %d\n", workerCount)
+        }
+        workerMutex.Unlock()
+    }
 }
-
 
 // EPS monitörü
 func monitorEPS() {
@@ -243,7 +216,6 @@ func processLog(addr net.Addr, data []byte) {
 
     // EPS sayacını artır
     mu.Lock()
-	ipEPS[ip]++
     epsCounter++
     mu.Unlock()
 }
