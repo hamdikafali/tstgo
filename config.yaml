@@ -1,1 +1,2 @@
-
+eps_check_interval: 60  # EPS limitlerini kontrol etme süresi (saniye cinsinden)
+config_check_interval: 120  # config.yaml dosyasını kontrol etme süresi (saniye cinsinden)
