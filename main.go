@@ -32,7 +32,7 @@ var (
     config       Config
     epsConfig    EPSConfig
 	ipEPS = make(map[string]int)
-	EPSCheckInterval int `yaml:"eps_check_interval"`
+	//EPSCheckInterval int `yaml:"eps_check_interval"`
 )
 type LogEntry struct {
     IP        string
@@ -46,6 +46,12 @@ type LogEntry struct {
 type Config struct {
     Devices  map[string]string   `json:"devices"`
     LogTypes map[string][]string `json:"log_types"`
+}
+
+
+var yamlConfig struct {
+    EPSCheckInterval   int `yaml:"eps_check_interval"`
+    ConfigCheckInterval int `yaml:"config_check_interval"`
 }
 
 // EPSConfig struct to hold the EPS limits from the JSON file
@@ -66,20 +72,41 @@ func loadYAMLConfig() error {
     }
     return yaml.Unmarshal(data, &yamlConfig)
 }
+
+func monitorYAMLConfigFile() {
+    ticker := time.NewTicker(time.Duration(yamlConfig.ConfigCheckInterval) * time.Second)
+    for range ticker.C {
+        err := loadYAMLConfig()
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "YAML Konfigürasyon yeniden yüklenirken hata: %v\n", err)
+        } else {
+            fmt.Println("YAML Konfigürasyonu yeniden yüklendi.")
+        }
+    }
+}
+
 func main() {
     var wg sync.WaitGroup
 
-    // Ana Konfigürasyon dosyasını yükle
-    err := loadConfig(configFile)
+    // YAML ilk yükle  dosyasını düzenli kontrol etmeye başla	
+	err := loadYAMLConfig()
     if err != nil {
-        fmt.Println(os.Stderr, "Ana Konfigürasyon yüklenirken hata: %v\\n", err)
+        fmt.Fprintf(os.Stderr, "YAML Konfigürasyon yüklenirken hata: %v\n", err)
+        os.Exit(1)
+    }
+    go monitorYAMLConfigFile()
+
+    // Ana Konfigürasyon dosyasını yükle
+    err = loadConfig(configFile)
+    if err != nil {
+        fmt.Println(os.Stderr, "Ana Konfigürasyon yüklenirken hata: %v\n", err)
         os.Exit(1)
     }
 
     // EPS Konfigürasyon dosyasını yükle
     err = loadEPSConfig(epsConfigFile)
     if err != nil {
-        fmt.Println(os.Stderr, "EPS Konfigürasyon yüklenirken hata: %v\\n", err)
+        fmt.Println(os.Stderr, "EPS Konfigürasyon yüklenirken hata: %v\n", err)
         os.Exit(1)
     }
 
@@ -139,7 +166,7 @@ func monitorConfigFile() {
     for range ticker.C {
         err := loadEPSConfig(epsConfigFile)
         if err != nil {
-            fmt.Println(os.Stderr, "EPS Konfigürasyon yeniden yüklenirken hata: %v\\n", err)
+            fmt.Println(os.Stderr, "EPS Konfigürasyon yeniden yüklenirken hata: %v\n", err)
         } else {
             fmt.Println("EPS Konfigürasyonu yeniden yüklendi.")
         }
@@ -155,7 +182,7 @@ func manageWorkers() {
             fmt.Printf("İşçi sayısı artırıldı: %d\n", workerCount)
         } else if len(logChannel) < bufferSize/4 && workerCount > initialWorkerCount {
             workerCount--
-            fmt.PrintPrintfln("İşçi sayısı azaltıldı: %d\n", workerCount)
+            fmt.Printf("İşçi sayısı azaltıldı: %d\n", workerCount)
         }
         workerMutex.Unlock()
     }
@@ -198,7 +225,7 @@ func worker(wg *sync.WaitGroup) {
 func listenUDP(address string) {
     conn, err := net.ListenPacket("udp", address)
     if err != nil {
-        fmt.Println(os.Stderr, "UDP dinleme hatası: %v\\n", err)
+        fmt.Println(os.Stderr, "UDP dinleme hatası: %v\n", err)
         os.Exit(1)
     }
     defer conn.Close()
@@ -207,7 +234,7 @@ func listenUDP(address string) {
     for {
         n, addr, err := conn.ReadFrom(buffer)
         if err != nil {
-            fmt.Println(os.Stderr, "UDP log alımı sırasında hata: %v\\n", err)
+            fmt.Println(os.Stderr, "UDP log alımı sırasında hata: %v\n", err)
             continue
         }
 
@@ -218,7 +245,7 @@ func listenUDP(address string) {
 func listenTCP(address string) {
     ln, err := net.Listen("tcp", address)
     if err != nil {
-        fmt.Println(os.Stderr, "TCP dinleme hatası: %v\\n", err)
+        fmt.Println(os.Stderr, "TCP dinleme hatası: %v\n", err)
         os.Exit(1)
     }
     defer ln.Close()
@@ -228,7 +255,7 @@ func listenTCP(address string) {
     for {
         conn, err := ln.Accept()
         if err != nil {
-            fmt.Println(os.Stderr, "TCP bağlantı hatası: %v\\n", err)
+            fmt.Println(os.Stderr, "TCP bağlantı hatası: %v\n", err)
             continue
         }
 
@@ -249,7 +276,7 @@ func handleTCPConnection(conn net.Conn) {
         n, err := conn.Read(buffer)
         if err != nil {
             if err.Error() != "EOF" {
-                fmt.Println(os.Stderr, "TCP log alımı sırasında hata: %v\\n", err)
+                fmt.Println(os.Stderr, "TCP log alımı sırasında hata: %v\n", err)
             }
             return
         }
@@ -334,7 +361,7 @@ func saveLog(entry LogEntry) {
         }
         defer file.Close()
 
-        _, err = file.WriteString(fmt.Sprintf("%s\\n", entry.Message))
+        _, err = file.WriteString(fmt.Sprintf("%s\n", entry.Message))
         if err != nil {
             logError(err, "Mesaj yazılamadı")
             time.Sleep(2 * time.Second) // 2 saniye bekleme
@@ -351,5 +378,5 @@ func logError(err error, context string) {
     defer file.Close()
 
     timestamp := time.Now().Format("2006-01-02 15:04:05")
-    file.WriteString(fmt.Sprintf("[%s] %s: %v\\n", timestamp, context, err))
+    file.WriteString(fmt.Sprintf("[%s] %s: %v\n", timestamp, context, err))
 }
