@@ -1,216 +1,222 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	maxBufferSize = 4096
-	queueSize     = 1000
-	maxRetries    = 3
+	workerCount     = 1000  // İşçi sayısı
+	bufferSize      = 10000 // Bellek tamponu boyutu (10.000 log)
+	maxConnections  = 10000 // Maksimum TCP bağlantı sayısı
+	logDir          = "logs"
 )
 
-type logSource struct {
-	Name    string
-	Pattern *regexp.Regexp
-	Type    string
-}
+var logChannel = make(chan LogEntry, bufferSize)
+var epsCounter int
+var mu sync.Mutex
 
-type logEntry struct {
-	sourceIP string
-	message  string
-	source   logSource
-}
-
-var (
-	logQueue   = make(chan logEntry, queueSize)
-	wg         sync.WaitGroup
-	processWg  sync.WaitGroup
-	// Desteklenen log kaynakları
-	logSources = []logSource{
-		{
-			Name:    "MikroTik Firewall",
-			Pattern: regexp.MustCompile(`(?i)firewall`),
-			Type:    "firewall",
-		},
-		{
-			Name:    "MikroTik DHCP",
-			Pattern: regexp.MustCompile(`(?i)dhcp`),
-			Type:    "dhcp",
-		},
-		{
-			Name:    "MikroTik Hotspot",
-			Pattern: regexp.MustCompile(`(?i)hotspot`),
-			Type:    "hotspot",
-		},
-		{
-			Name:    "Cisco Firewall",
-			Pattern: regexp.MustCompile(`(?i)cisco.*firewall`),
-			Type:    "firewall",
-		},
-		{
-			Name:    "Fortinet UTM",
-			Pattern: regexp.MustCompile(`(?i)fortinet.*utm`),
-			Type:    "utm",
-		},
-		{
-			Name:    "Palo Alto Firewall",
-			Pattern: regexp.MustCompile(`(?i)palo alto.*firewall`),
-			Type:    "firewall",
-		},
-	}
-)
-
-// TCP bağlantıları işleme
-func handleTCPConnection(conn net.Conn) {
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
-	for {
-		message, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Println("TCP bağlantı kapandı:", err)
-			return
-		}
-		processLog(message, conn.RemoteAddr().String())
-	}
-}
-
-// UDP bağlantıları işleme
-func handleUDPConnection(conn *net.UDPConn) {
-	buffer := make([]byte, maxBufferSize)
-	for {
-		n, addr, err := conn.ReadFromUDP(buffer)
-		if err != nil {
-			fmt.Println("UDP bağlantı hatası:", err)
-			continue
-		}
-		message := string(buffer[:n])
-		processLog(message, addr.String())
-	}
-}
-
-// Logları ayrıştırmak ve kuyruğa eklemek
-func processLog(message, sourceIP string) {
-	for _, source := range logSources {
-		if source.Pattern.MatchString(message) {
-			logQueue <- logEntry{
-				sourceIP: sourceIP,
-				message:  message,
-				source:   source,
-			}
-			return
-		}
-	}
-	// Tanımsız loglar için bir işlem yapılacaksa buraya ekleyebilirsiniz
-	fmt.Printf("Bilinmeyen log kaynağı: %s\n", message)
-}
-
-// Log mesajlarını işleme
-func processLogMessages() {
-	defer processWg.Done()
-	for entry := range logQueue {
-		processLogMessage(entry)
-	}
-}
-
-// Logları IP'ye, türüne ve tarihine göre işleme
-func processLogMessage(entry logEntry) {
-	ip := strings.Split(entry.sourceIP, ":")[0]
-
-	today := time.Now().Format("2006-01-02")
-	directory := filepath.Join("logs", ip, today)
-	err := os.MkdirAll(directory, 0755)
-	if err != nil {
-		fmt.Println("Klasör oluşturulamadı:", err)
-		return
-	}
-
-	filePath := filepath.Join(directory, entry.source.Type+".log")
-	for i := 0; i < maxRetries; i++ {
-		err = writeLogToFile(filePath, entry.message+"\n") // Mesaj sonuna yeni satır ekle
-		if err == nil {
-			break
-		}
-		fmt.Printf("Log dosyaya yazılamadı (deneme %d/%d): %v\n", i+1, maxRetries, err)
-		time.Sleep(100 * time.Millisecond) // Retry arasında kısa bir bekleme
-	}
-}
-
-// Dosyaya yazma işlemi
-func writeLogToFile(filePath, message string) error {
-	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	writer := bufio.NewWriter(file)
-	_, err = writer.WriteString(message)
-	if err != nil {
-		return err
-	}
-
-	err = writer.Flush()
-	return err
+type LogEntry struct {
+	IP        string
+	LogType   string
+	Message   string
+	Timestamp time.Time
 }
 
 func main() {
-	processWg.Add(1)
-	go processLogMessages()
+	var wg sync.WaitGroup
 
-	// TCP dinleyici başlatma
-	tcpLn, err := net.Listen("tcp", ":514")
-	if err != nil {
-		fmt.Println("TCP dinleme başlatılamadı:", err)
-		os.Exit(1)
-	}
-	defer tcpLn.Close()
-	fmt.Println("TCP Log Listener 514 portundan dinliyor...")
+	// EPS sayaç fonksiyonunu başlat
+	go monitorEPS()
 
-	// UDP dinleyici başlatma
-	udpAddr, err := net.ResolveUDPAddr("udp", ":514")
-	if err != nil {
-		fmt.Println("UDP adresi çözülemedi:", err)
-		os.Exit(1)
+	// İşçi havuzunu başlat
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker(&wg)
 	}
 
-	udpLn, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		fmt.Println("UDP dinleme başlatılamadı:", err)
-		os.Exit(1)
-	}
-	defer udpLn.Close()
-	fmt.Println("UDP Log Listener 514 portundan dinliyor...")
-
-	// TCP bağlantıları kabul etmek için goroutine
+	// TCP ve UDP dinleyicilerini başlat
+	wg.Add(1)
 	go func() {
-		for {
-			conn, err := tcpLn.Accept()
-			if err != nil {
-				fmt.Println("TCP bağlantı kabul edilemedi:", err)
-				continue
-			}
-			wg.Add(1)
-			go func() {
-				handleTCPConnection(conn)
-				wg.Done()
-			}()
+		defer wg.Done()
+		listenUDP("0.0.0.0:514")
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		listenTCP("0.0.0.0:514")
+	}()
+
+	fmt.Println("Log dinleme başlatıldı.")
+	wg.Wait()
+	close(logChannel)
+}
+
+// EPS monitörü
+func monitorEPS() {
+	ticker := time.NewTicker(1 * time.Second)
+	for range ticker.C {
+		mu.Lock()
+		fmt.Printf("Anlık EPS: %d\n", epsCounter)
+		epsCounter = 0
+		mu.Unlock()
+	}
+}
+
+// İşçi fonksiyonu
+func worker(wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for logEntry := range logChannel {
+		saveLog(logEntry)
+	}
+}
+
+// UDP log dinleme fonksiyonu
+func listenUDP(address string) {
+	conn, err := net.ListenPacket("udp", address)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "UDP dinleme hatası: %v\n", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	buffer := make([]byte, 8192)
+	for {
+		n, addr, err := conn.ReadFrom(buffer)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "UDP log alımı sırasında hata: %v\n", err)
+			continue
 		}
-	}()
 
-	// UDP bağlantıları dinleme
-	go func() {
-		handleUDPConnection(udpLn)
-	}()
+		processLog(addr, buffer[:n])
+	}
+}
 
-	// Programın kapanmasını engellemek için sonsuz döngü
-	select {}
+// TCP log dinleme fonksiyonu
+func listenTCP(address string) {
+	ln, err := net.Listen("tcp", address)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "TCP dinleme hatası: %v\n", err)
+		os.Exit(1)
+	}
+	defer ln.Close()
+
+	semaphore := make(chan struct{}, maxConnections)
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "TCP bağlantı hatası: %v\n", err)
+			continue
+		}
+
+		semaphore <- struct{}{}
+		go func() {
+			handleTCPConnection(conn)
+			<-semaphore
+		}()
+	}
+}
+
+// TCP bağlantısını işleyen fonksiyon
+func handleTCPConnection(conn net.Conn) {
+	defer conn.Close()
+
+	buffer := make([]byte, 8192)
+	for {
+		n, err := conn.Read(buffer)
+		if err != nil {
+			if err.Error() != "EOF" {
+				fmt.Fprintf(os.Stderr, "TCP log alımı sırasında hata: %v\n", err)
+			}
+			return
+		}
+
+		processLog(conn.RemoteAddr(), buffer[:n])
+	}
+}
+
+// Logları işleyen fonksiyon
+func processLog(addr net.Addr, data []byte) {
+	ip := strings.Split(addr.String(), ":")[0]
+	logMessage := string(data)
+	logType := determineLogType(logMessage)
+
+	logChannel <- LogEntry{
+		IP:        ip,
+		LogType:   logType,
+		Message:   logMessage,
+		Timestamp: time.Now(),
+	}
+
+	// EPS sayacını artır
+	mu.Lock()
+	epsCounter++
+	mu.Unlock()
+}
+
+// Log türünü belirler
+func determineLogType(message string) string {
+	message = strings.ToLower(message)
+	switch {
+	case strings.Contains(message, "firewall"):
+		return "firewall"
+	case strings.Contains(message, "dhcp"):
+		return "dhcp"
+	case strings.Contains(message, "hotspot"):
+		return "hotspot"
+	default:
+		return "general"
+	}
+}
+
+func saveLog(entry LogEntry) {
+	dateFolder := entry.Timestamp.Format("02-01-2006") // gün-ay-yıl formatı
+
+	// logs/IP/gün-ay-yıl/logturu.log yapısını oluştur
+	folderPath := filepath.Join(logDir, entry.IP, dateFolder)
+	err := os.MkdirAll(folderPath, 0755)
+	if err != nil {
+		logError(err, "Klasör oluşturulamadı")
+		return
+	}
+
+	// Günlük log dosyası ismi
+	logFilePath := filepath.Join(folderPath, fmt.Sprintf("%s-%s.log", entry.LogType, entry.Timestamp.Format("02-01-2006")))
+
+	// Dosya açma ve yazma denemesi
+	for i := 0; i < 3; i++ { // Yeniden deneme sayısı
+		file, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			logError(err, "Log dosyası açılamadı")
+			time.Sleep(2 * time.Second) // 2 saniye bekleme
+			continue
+		}
+		defer file.Close()
+
+		_, err = file.WriteString(fmt.Sprintf("%s\n", entry.Message))
+		if err != nil {
+			logError(err, "Mesaj yazılamadı")
+			time.Sleep(2 * time.Second) // 2 saniye bekleme
+			continue
+		}
+		break // Başarılı olursa döngüden çık
+	}
+}
+
+// Hataları loglayan fonksiyon
+func logError(err error, context string) {
+	errorLogPath := filepath.Join(logDir, "error.log")
+	file, _ := os.OpenFile(errorLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	defer file.Close()
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	file.WriteString(fmt.Sprintf("[%s] %s: %v\n", timestamp, context, err))
 }
