@@ -1,2 +1,8 @@
-eps_check_interval: 60  # EPS limitlerini kontrol etme süresi (saniye cinsinden)
-config_check_interval: 120  # config.yaml dosyasını kontrol etme süresi (saniye cinsinden)
+eps_check_interval: 60          # EPS kontrol etme sıklığı (saniye cinsinden)
+log_interval: 1                 # EPS verilerini log dosyasına yazma sıklığı (dakika cinsinden)
+post_interval: 1                # POST işlemi yapma sıklığı (dakika cinsinden)
+post_url: "https://kcrm.kclogger.com/cron/logControl.php"   # POST işleminin yapılacağı URL
+ip: "10.10.44.68"               # IP adresi
+musteri: "ngn"                  # Müşteri adı
+id: "123"                       # Müşteri ID'si
+log_dir: "/var/log/kclogger"     # Log dosyalarının kaydedileceği dizin
